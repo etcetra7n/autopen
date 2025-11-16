@@ -1,0 +1,517 @@
+# encoding: utf-8
+# 2025 R2
+SetScriptVersion(Version="25.2.170")
+template1 = GetTemplate(
+    TemplateName="Static Structural",
+    Solver="ANSYS")
+system1 = template1.CreateSystem()
+system1.DisplayText = "LoadCase"
+geometry1 = system1.GetContainer(ComponentName="Geometry")
+geometry1.SetFile(FilePath="C:/Users/etcet/AppData/Local/Temp/PhysicsTransfer/ansys.pmdb")
+engineeringData1 = system1.GetContainer(ComponentName="Engineering Data")
+material1 = engineeringData1.GetMaterial(Name="Structural Steel")
+material1.Delete()
+matl1 = engineeringData1.CreateMaterial(Name="Structural steel, S275N")
+matlProp1 = matl1.CreateProperty(
+    Name="Elasticity",
+    Behavior="Isotropic",
+    Qualifiers={"Definition": "", "Behavior": "Isotropic"})
+matlProp1.SetData(
+    Index=-1,
+    Variables=["Young's Modulus"],
+    Values=[["210000000000 [Pa]"]])
+matlProp1.SetData(
+    Variables=["Poisson's Ratio"],
+    Values=[["0.3046"]])
+matlProp2 = matl1.CreateProperty(
+    Name="Thermal Conductivity",
+    Behavior="Isotropic",
+    Qualifiers={"Definition": "", "Behavior": "Isotropic"})
+matlProp2.SetData(
+    Index=-1,
+    Variables=["Thermal Conductivity"],
+    Values=[["50.44 [W m^-1 K^-1]"]])
+matlProp3 = matl1.CreateProperty(
+    Name="Coefficient of Thermal Expansion",
+    Definition="Secant",
+    Behavior="Isotropic",
+    Qualifiers={"Definition": "Secant", "Behavior": "Isotropic"})
+matlProp3.SetData(
+    SheetName="Coefficient of Thermal Expansion",
+    SheetQualifiers={"Definition": "Secant", "Behavior": "Isotropic"},
+    Index=-1,
+    Variables=["Coefficient of Thermal Expansion"],
+    Values=[["1.196E-05 [K^-1]"]])
+matlProp4 = matl1.CreateProperty(
+    Name="Specific Heat",
+    Definition="Constant Pressure",
+    Qualifiers={"Definition": "Constant Pressure", "Behavior": ""})
+matlProp4.SetData(
+    Index=-1,
+    Variables=["Specific Heat"],
+    Values=[["479.4 [J kg^-1 K^-1]"]])
+matlProp5 = matl1.CreateProperty(
+    Name="Density",
+    Qualifiers={"Definition": "", "Behavior": ""})
+matlProp5.SetData(
+    Index=-1,
+    Variables=["Density"],
+    Values=[["7850 [kg m^-3]"]])
+modelComponent1 = system1.GetComponent(Name="Model")
+modelComponent1.Refresh()
+model1 = system1.GetContainer(ComponentName="Model")
+model1.Edit()
+model1.SendCommand(
+    Command="""
+# -*- coding: utf-8 -*-
+from System.Collections.Generic import IEnumerable, List
+import System
+import ui_handlers
+import re
+from functools import cmp_to_key
+
+def SuppressOtherGeoBodies(geoBodyIds):
+	geometry = Model.Geometry
+	geoData = ExtAPI.DataModel.GeoData
+	studyBodyIds = list()
+	for geoBodyId in geoBodyIds:
+		body = geometry.GetBody(geoData.GeoEntityById(geoBodyId))
+		if body == None: continue
+		studyBodyIds.Add(body.ObjectId)
+	bodies = [obj for obj in geometry.GetChildren(DataModelObjectCategory.Body, True) if obj.ObjectState != ObjectState.Suppressed]
+	for body in bodies:
+		if body.ObjectId in studyBodyIds: continue
+		body.Suppressed = True
+
+def MakeGeoBodiesRigid(geoBodyIds):
+	geometry = Model.Geometry
+	geoData = ExtAPI.DataModel.GeoData
+	for geoBodyId in geoBodyIds:
+		body = geometry.GetBody(geoData.GeoEntityById(geoBodyId))
+		if body == None: continue
+		body.StiffnessBehavior = StiffnessBehavior.Rigid
+
+def AssignMaterialByIds(bodyIds, matname, coordSystemIdx):
+	if bodyIds.Count < 1: return
+	coordinateSystems = Model.GetChildren(DataModelObjectCategory.CoordinateSystem, True)
+	for body in Model.GetChildren(DataModelObjectCategory.Body, True):
+		geoBody = body.GetGeoBody()
+		if geoBody.Id in bodyIds:
+			body.Material = matname
+			body.CoordinateSystem = coordinateSystems[coordSystemIdx]
+
+def AssignMaterialByNS(nsname, matname, coordSystemIdx):
+	bodyIds = []
+	for ns in Model.GetChildren(DataModelObjectCategory.NamedSelection, True):
+		if ns.Name == nsname:
+			bodyIds.extend(ns.Location.Ids)
+	AssignMaterialByIds(bodyIds, matname, coordSystemIdx)
+
+def GetNamedSelectionByName(name):
+	for ns in Model.GetChildren(DataModelObjectCategory.NamedSelection, True):
+		if ns.Name == name: return ns
+	return None
+
+def GetFluidSolidInterfaceNamedSelection():
+	p = re.compile('^FluidSolidInterface_[0-9]{14}_1$')
+	for ns in Model.NamedSelections.Children:
+		if p.match(ns.Name) != None: return ns
+	return None
+
+def DeleteConnectionGroups():
+	if Model.Connections:
+		connectionGroupIds = [group.ObjectId for group in Model.Connections.GetChildren(DataModelObjectCategory.ConnectionGroup, False)]
+		for connectionGroupId in connectionGroupIds:
+			obj = DataModel.GetObjectById(connectionGroupId)
+			if obj: obj.Delete()
+	else:
+		Model.AddConnections()
+
+def SetContactGroup():
+	if Model.Connections == None: Model.AddConnections()
+	contactGroups = [group for group in Model.GetChildren(DataModelObjectCategory.ConnectionGroup, True) if group.ConnectionType == AutoDetectionType.Contact]
+	if contactGroups.Count < 1:
+		contactGroup = Model.Connections.AddConnectionGroup()
+		contactGroup.ConnectionType = AutoDetectionType.Contact
+		return contactGroup
+
+def GetContactGroup():
+	contactGroups = [group for group in Model.GetChildren(DataModelObjectCategory.ConnectionGroup, True) if group.ConnectionType == AutoDetectionType.Contact]
+	if contactGroups.Count > 0: return contactGroups[0]
+	else:
+		contactGroup = SetContactGroup()
+		return contactGroup
+	return None
+
+def SetJointGroup():
+	if Model.Connections == None: Model.AddConnections()
+	jointGroups = [group for group in Model.GetChildren(DataModelObjectCategory.ConnectionGroup, True) if group.ConnectionType == AutoDetectionType.Joint]
+	if jointGroups.Count < 1:
+		jointGroup = Model.Connections.AddConnectionGroup()
+		jointGroup.ConnectionType = AutoDetectionType.Joint
+		jointGroup.AutomaticFixedJoints = False
+		jointGroup.RevoluteJoints = False
+		return jointGroup
+
+def GetJointGroup():
+	jointGroups = [group for group in Model.GetChildren(DataModelObjectCategory.ConnectionGroup, True) if group.ConnectionType == AutoDetectionType.Joint]
+	if jointGroups.Count > 0: return jointGroups[0]
+	else:
+		jointGroup = SetJointGroup()
+		return jointGroup
+	return None
+
+def SetField(analysis, prop, val, unit):
+	if analysis.AnalysisType in [AnalysisType.Static, AnalysisType.Transient]:
+		inputs = []
+		outputs = []
+		for i in range(1, analysis.AnalysisSettings.NumberOfSteps+1):
+			endTime = analysis.AnalysisSettings.GetStepEndTime(i)
+			inputs.Add(Quantity(\"{0} [s]\".format(endTime.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))))
+			if i == analysis.AnalysisSettings.NumberOfSteps:
+				outputs.Add(Quantity(\"{0} [{1}]\".format(val.ToString(System.Globalization.CultureInfo.InvariantCulture), unit)))
+			else:
+				outputs.Add(Quantity(\"0.0 [{0}]\".format(unit)))
+		prop.Inputs[0].DiscreteValues = inputs
+		prop.Output.DiscreteValues = outputs
+
+	elif analysis.AnalysisType in [AnalysisType.Harmonic, AnalysisType.Spectrum, AnalysisType.ResponseSpectrum]:
+		prop.Inputs[0].DiscreteValues = [Quantity(\"{0} [Hz]\".format(1.0))]
+		prop.Output.DiscreteValues = [Quantity(\"{0} [{1}]\".format(val.ToString(System.Globalization.CultureInfo.InvariantCulture), unit))]
+
+def GetSelectionArea(object):
+	import units
+	cadUnit = ExtAPI.DataModel.GeoData.Assemblies[0].Unit
+	area = 0
+	for id in bc.Location.Ids: area += ExtAPI.DataModel.GeoData.GeoEntityById(id).Area
+	area = units.ConvertUnit(area, cadUnit, \"m\")
+	return area
+
+def FlipInvalidContacts():
+	contacts = [contact for contact in Model.GetChildren(DataModelObjectCategory.ContactRegion, True) if not contact.Suppressed]
+	for contact in contacts:
+		if contact.InternalObject.State == 2:
+			contact.FlipContactTarget()
+
+def SetPickFilter(selection):
+	ds = DataModel.InternalObject[\"ds\"]
+	sm = ds.SelectionManager()
+	geoType = DataModel.GeoData.GeoEntityById(selection.Ids[0]).Type
+	if geoType == GeoCellTypeEnum.GeoBody:
+		sm.PickFilterAuto = 1
+	elif geoType == GeoCellTypeEnum.GeoFace:
+		sm.PickFilterAuto = 2
+	elif geoType == GeoCellTypeEnum.GeoEdge:
+		sm.PickFilterAuto = 4
+	elif geoType == GeoCellTypeEnum.GeoVertex:
+		sm.PickFilterAuto = 8
+
+def DeleteDefaultConnections():
+	if Model.Connections:
+		contacts = [contact for contact in Model.GetChildren(DataModelObjectCategory.ContactRegion, True)]
+		with Transaction():
+			for obj in contacts:
+				if obj.ScopeMode == AutomaticOrManual.Automatic: obj.Delete()
+	else:
+		Model.AddConnections()
+
+def datamodel_cmp(a,b):
+	if a.DataModelObjectCategory == DataModelObjectCategory.CoordinateSystem:
+		if b.DataModelObjectCategory != DataModelObjectCategory.CoordinateSystem:
+			return 1
+	else:
+		return -1
+
+datamodel_key = cmp_to_key(datamodel_cmp)
+
+def GetDiscoveryObjects():
+	objects = [child for child in Model.GetChildren(DataModelObjectCategory.DataModelObject,True) if hasattr(child, 'ImportableObjectSourceId') and child.ImportableObjectSourceId == \"Discovery\" and child.DataModelObjectCategory != DataModelObjectCategory.Analysis and child.DataModelObjectCategory != DataModelObjectCategory.Mesh]
+	objects.sort(key=datamodel_key)
+	return objects
+
+kept_analyses = []
+last_analysis = None
+
+DeleteConnectionGroups()
+ExtAPI.Application.ActiveUnitSystem = MechanicalUnitSystem.StandardMKS
+ExtAPI.Application.ActiveAngularVelocityUnit = AngularVelocityUnitType.RadianPerSecond
+
+is_beta_on = ExtAPI.Application.ScriptByName(\"jscript\").CallJScript(\"DSIsBetaOptionsEnabled\")
+
+with Transaction():
+	ExtAPI.Log.WriteMessage(\"Start Model Transfer\")
+	try:
+		SuppressOtherGeoBodies([115])
+
+	except:
+		pass
+
+	mapOfImportedObjects = GetDiscoveryObjects()
+	try:
+		refTempsIds = [115]
+		for body in Model.GetChildren(DataModelObjectCategory.Body, True):
+			geoBody = body.GetGeoBody()
+			if geoBody.Id in refTempsIds:
+				body.UseReferenceTemperatureByBody = True
+				body.ReferenceTemperatureValue = Quantity(295.15, \"K\")
+	except:
+		message = Ansys.Mechanical.Application.Message('Reference Temperature' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = Model
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	try:
+		AssignMaterialByIds([115], 'Structural steel, S275N', 0)
+	except:
+		message = Ansys.Mechanical.Application.Message('Structural steel, S275N' + \" material couldn't be assigned.\", MessageSeverityType.Warning)
+		message.Source = Model
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	analysis = Model.Analyses[0]
+	analysis.Name = \"LoadCase\"
+
+	analysis.EnvironmentTemperature = Quantity(\"295.15 [K]\")
+	analysis.ImportableObjectSourceId = \"Discovery\"
+	try:
+		objects = analysis.GetChildren(DataModelObjectCategory.FixedSupport, True)
+		bcs = [bcs for bcs in objects if bcs.TransferableObjectId == \"d2875be7-729a-4792-9583-6afa945bad10\"]
+		if bcs.Count != 0:
+			mapOfImportedObjects = [object for object in mapOfImportedObjects if object.TransferableObjectId != \"d2875be7-729a-4792-9583-6afa945bad10\"]
+			bc = bcs[0]
+		else:
+			bc = analysis.AddFixedSupport()
+			bc.ImportableObjectSourceId = \"Discovery\"
+			bc.TransferableObjectId = \"d2875be7-729a-4792-9583-6afa945bad10\"
+		if bc.ReadOnly and analysis.ReadOnly:
+			bc.ReadOnly = False
+			bc.Name = \"Fixed Support 1\"
+			bc2 = bc
+			selection = ExtAPI.SelectionManager.CreateSelectionInfo(SelectionTypeEnum.GeometryEntities)
+			selection.Ids = [188,198,70,69]
+			SetPickFilter(selection)
+			bc.Location = selection
+		bc.ImportableObjectSourceId = \"\"
+		bc.ReadOnly = False
+		pass
+	except:
+		message = Ansys.Mechanical.Application.Message('Fixed Support 1' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = analysis
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	try:
+		objects = analysis.GetChildren(DataModelObjectCategory.FixedSupport, True)
+		bcs = [bcs for bcs in objects if bcs.TransferableObjectId == \"2fe748e5-35cb-4088-815c-704b653bde42\"]
+		if bcs.Count != 0:
+			mapOfImportedObjects = [object for object in mapOfImportedObjects if object.TransferableObjectId != \"2fe748e5-35cb-4088-815c-704b653bde42\"]
+			bc = bcs[0]
+		else:
+			bc = analysis.AddFixedSupport()
+			bc.ImportableObjectSourceId = \"Discovery\"
+			bc.TransferableObjectId = \"2fe748e5-35cb-4088-815c-704b653bde42\"
+		if bc.ReadOnly and analysis.ReadOnly:
+			bc.ReadOnly = False
+			bc.Name = \"Fixed Support 2\"
+			bc3 = bc
+			selection = ExtAPI.SelectionManager.CreateSelectionInfo(SelectionTypeEnum.GeometryEntities)
+			selection.Ids = [188,198,70,69]
+			SetPickFilter(selection)
+			bc.Location = selection
+		bc.ImportableObjectSourceId = \"\"
+		bc.ReadOnly = False
+		pass
+	except:
+		message = Ansys.Mechanical.Application.Message('Fixed Support 2' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = analysis
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	try:
+		objects = analysis.GetChildren(DataModelObjectCategory.FixedSupport, True)
+		bcs = [bcs for bcs in objects if bcs.TransferableObjectId == \"03748a8c-bdb8-479a-b6c0-da1019dcb4cb\"]
+		if bcs.Count != 0:
+			mapOfImportedObjects = [object for object in mapOfImportedObjects if object.TransferableObjectId != \"03748a8c-bdb8-479a-b6c0-da1019dcb4cb\"]
+			bc = bcs[0]
+		else:
+			bc = analysis.AddFixedSupport()
+			bc.ImportableObjectSourceId = \"Discovery\"
+			bc.TransferableObjectId = \"03748a8c-bdb8-479a-b6c0-da1019dcb4cb\"
+		if bc.ReadOnly and analysis.ReadOnly:
+			bc.ReadOnly = False
+			bc.Name = \"Fixed Support 3\"
+			bc4 = bc
+			selection = ExtAPI.SelectionManager.CreateSelectionInfo(SelectionTypeEnum.GeometryEntities)
+			selection.Ids = [188]
+			SetPickFilter(selection)
+			bc.Location = selection
+		bc.ImportableObjectSourceId = \"\"
+		bc.ReadOnly = False
+		pass
+	except:
+		message = Ansys.Mechanical.Application.Message('Fixed Support 3' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = analysis
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	try:
+		objects = analysis.GetChildren(DataModelObjectCategory.FixedSupport, True)
+		bcs = [bcs for bcs in objects if bcs.TransferableObjectId == \"5c47bb81-c4bb-4133-a3e2-6351bf6a33e9\"]
+		if bcs.Count != 0:
+			mapOfImportedObjects = [object for object in mapOfImportedObjects if object.TransferableObjectId != \"5c47bb81-c4bb-4133-a3e2-6351bf6a33e9\"]
+			bc = bcs[0]
+		else:
+			bc = analysis.AddFixedSupport()
+			bc.ImportableObjectSourceId = \"Discovery\"
+			bc.TransferableObjectId = \"5c47bb81-c4bb-4133-a3e2-6351bf6a33e9\"
+		if bc.ReadOnly and analysis.ReadOnly:
+			bc.ReadOnly = False
+			bc.Name = \"Fixed Support 4\"
+			bc5 = bc
+			selection = ExtAPI.SelectionManager.CreateSelectionInfo(SelectionTypeEnum.GeometryEntities)
+			selection.Ids = [198]
+			SetPickFilter(selection)
+			bc.Location = selection
+		bc.ImportableObjectSourceId = \"\"
+		bc.ReadOnly = False
+		pass
+	except:
+		message = Ansys.Mechanical.Application.Message('Fixed Support 4' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = analysis
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	try:
+		objects = analysis.GetChildren(DataModelObjectCategory.FixedSupport, True)
+		bcs = [bcs for bcs in objects if bcs.TransferableObjectId == \"fb8b7206-b634-4a5e-a91e-98d1b6e7fe92\"]
+		if bcs.Count != 0:
+			mapOfImportedObjects = [object for object in mapOfImportedObjects if object.TransferableObjectId != \"fb8b7206-b634-4a5e-a91e-98d1b6e7fe92\"]
+			bc = bcs[0]
+		else:
+			bc = analysis.AddFixedSupport()
+			bc.ImportableObjectSourceId = \"Discovery\"
+			bc.TransferableObjectId = \"fb8b7206-b634-4a5e-a91e-98d1b6e7fe92\"
+		if bc.ReadOnly and analysis.ReadOnly:
+			bc.ReadOnly = False
+			bc.Name = \"Fixed Support 5\"
+			bc6 = bc
+			selection = ExtAPI.SelectionManager.CreateSelectionInfo(SelectionTypeEnum.GeometryEntities)
+			selection.Ids = [70]
+			SetPickFilter(selection)
+			bc.Location = selection
+		bc.ImportableObjectSourceId = \"\"
+		bc.ReadOnly = False
+		pass
+	except:
+		message = Ansys.Mechanical.Application.Message('Fixed Support 5' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = analysis
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	try:
+		objects = analysis.GetChildren(DataModelObjectCategory.FixedSupport, True)
+		bcs = [bcs for bcs in objects if bcs.TransferableObjectId == \"bef34f1a-5b0d-4954-a5b0-08b09a579cbe\"]
+		if bcs.Count != 0:
+			mapOfImportedObjects = [object for object in mapOfImportedObjects if object.TransferableObjectId != \"bef34f1a-5b0d-4954-a5b0-08b09a579cbe\"]
+			bc = bcs[0]
+		else:
+			bc = analysis.AddFixedSupport()
+			bc.ImportableObjectSourceId = \"Discovery\"
+			bc.TransferableObjectId = \"bef34f1a-5b0d-4954-a5b0-08b09a579cbe\"
+		if bc.ReadOnly and analysis.ReadOnly:
+			bc.ReadOnly = False
+			bc.Name = \"Fixed Support 6\"
+			bc7 = bc
+			selection = ExtAPI.SelectionManager.CreateSelectionInfo(SelectionTypeEnum.GeometryEntities)
+			selection.Ids = [75]
+			SetPickFilter(selection)
+			bc.Location = selection
+		bc.ImportableObjectSourceId = \"\"
+		bc.ReadOnly = False
+		pass
+	except:
+		message = Ansys.Mechanical.Application.Message('Fixed Support 6' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = analysis
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	try:
+		objects = analysis.GetChildren(DataModelObjectCategory.FixedSupport, True)
+		bcs = [bcs for bcs in objects if bcs.TransferableObjectId == \"17f58d75-5ff4-4691-90a4-e8a04d391f5a\"]
+		if bcs.Count != 0:
+			mapOfImportedObjects = [object for object in mapOfImportedObjects if object.TransferableObjectId != \"17f58d75-5ff4-4691-90a4-e8a04d391f5a\"]
+			bc = bcs[0]
+		else:
+			bc = analysis.AddFixedSupport()
+			bc.ImportableObjectSourceId = \"Discovery\"
+			bc.TransferableObjectId = \"17f58d75-5ff4-4691-90a4-e8a04d391f5a\"
+		if bc.ReadOnly and analysis.ReadOnly:
+			bc.ReadOnly = False
+			bc.Name = \"Fixed Support 7\"
+			bc8 = bc
+			selection = ExtAPI.SelectionManager.CreateSelectionInfo(SelectionTypeEnum.GeometryEntities)
+			selection.Ids = [83]
+			SetPickFilter(selection)
+			bc.Location = selection
+		bc.ImportableObjectSourceId = \"\"
+		bc.ReadOnly = False
+		pass
+	except:
+		message = Ansys.Mechanical.Application.Message('Fixed Support 7' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = analysis
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	try:
+		objects = analysis.GetChildren(DataModelObjectCategory.Force, True)
+		bcs = [bcs for bcs in objects if bcs.TransferableObjectId == \"5a226c5c-d8fd-4b52-b0a4-f1b796e4a9bb\"]
+		if bcs.Count != 0:
+			mapOfImportedObjects = [object for object in mapOfImportedObjects if object.TransferableObjectId != \"5a226c5c-d8fd-4b52-b0a4-f1b796e4a9bb\"]
+			bc = bcs[0]
+		else:
+			bc = analysis.AddForce()
+			bc.ImportableObjectSourceId = \"Discovery\"
+			bc.TransferableObjectId = \"5a226c5c-d8fd-4b52-b0a4-f1b796e4a9bb\"
+		if bc.ReadOnly and analysis.ReadOnly:
+			bc.ReadOnly = False
+			bc.Name = \"Distributed Force 1\"
+			bc9 = bc
+			selection = ExtAPI.SelectionManager.CreateSelectionInfo(SelectionTypeEnum.GeometryEntities)
+			selection.Ids = [166]
+			SetPickFilter(selection)
+			bc.Location = selection
+			bc.DefineBy=LoadDefineBy.Components
+			SetField(analysis, bc.XComponent, 0, \"N\")
+			SetField(analysis, bc.YComponent, 0, \"N\")
+			SetField(analysis, bc.ZComponent, -2, \"N\")
+		bc.ImportableObjectSourceId = \"\"
+		bc.ReadOnly = False
+		pass
+	except:
+		message = Ansys.Mechanical.Application.Message('Distributed Force 1' + \" object couldn't be created.\", MessageSeverityType.Warning)
+		message.Source = analysis
+		ExtAPI.Application.Messages.Add(message)
+		pass
+
+	analysis.ImportableObjectSourceId = \"\"
+	analysis.ReadOnly = False
+	if len(mapOfImportedObjects):
+		for object in mapOfImportedObjects:
+			object.ReadOnly = False
+			object.Delete()
+	if analysis.Solution.GetChildren(DataModelObjectCategory.DataModelObject, True).Count == 1:
+		analysis.Solution.AddTotalDeformation()
+
+	try:
+		ui_handlers.AnalyticsAction(\"ExternalStudyImporter.Discovery.Ansys.Contracts.StaticStructuralData\")
+	except:
+		pass
+
+FlipInvalidContacts()
+Graphics.Camera.SetFit()
+Graphics.ViewOptions.RescaleAnnotations()
+Graphics.Redraw()
+""",
+    Language="Python")
+model1.Exit()
+Save(Overwrite=True)
