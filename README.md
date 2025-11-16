@@ -1,2 +1,3 @@
 # Autopen
-A machine that will write anything with a pen in human handwriting
+
+A machine that mimicks human handwriting and does your assignments
